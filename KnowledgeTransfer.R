@@ -24,19 +24,36 @@ train_images = readDat(train_image_file, 10000)
 train_images_resize = resizeImages(train_images, 28, 28, 16, 16)
 train_labels = readLabels(train_label_file, 10000)
 # calculate skew on 1000 images as privileged information
-priv_info = rep(0, 1000)
+priv_info_skew = rep(0, 1000)
+priv_info_holes = rep(0, 1000)
 for (i in 1:1000) {
-  priv_info[i] = calcSkew(train_images, 28, 28, i)
+  temp_image = extractImage(train_images, 28, 28, i)
+  priv_info_skew[i] = calcSkew(temp_image)
+  priv_info_holes[i] = calcHoles(temp_image)
 }
 # Develop our phi model for calculating skew on remaining images
-phi_model = xgboost(data=train_images[1:1000,],
-                   label=priv_info,
+phi_model_skew = xgb.cv(data=train_images[1:1000,],
+                   label=priv_info_skew,
                    nrounds=100,
                    print=10,
                    max_depth=100,
-                   eta=0.1)
+                   eta=0.1,
+                   nfold=4,
+                   nthread=3)
+# Develop our phi model for calculating holes on remaining images
+phi_model_holes = xgboost(data=train_images[1:1000,],
+                         label=priv_info_holes,
+                         nrounds=500,
+                         print=10,
+                         max_depth=30,
+                         eta=0.01,
+                         nfold=4,
+                         nthread=3,
+                         objective="multi:softmax",
+                         num_class=4)
 # Add phi features to remaining data
-pred_priv_info = predict(phi_model, train_images[1001:10000,])
+pred_priv_info_skew = predict(phi_model_skew, train_images[1001:10000,])
+pred_priv_info_holes = predict(phi_model_holes, train_images[1001:10000,])
 train_and_phi = cbind(train_images, c(priv_info, pred_priv_info))
 # Build model on X and X*
 xgbcv = xgb.cv(data=train_and_phi,
@@ -92,8 +109,8 @@ resizeImages = function(images, inx, iny, outx, outy) {
 }
 
 # Function: showDigit - Display a digit [COMPLETE] ------------------------
-showDigit = function(image_matrix) {
-  return(image(image_matrix, col=grey(seq(1, 0, length=256))))
+showDigit = function(single_image) {
+  return(image(single_image, col=grey(seq(1, 0, length=256))))
 }
 
 
@@ -103,56 +120,75 @@ extractImage = function(image_matrix, w, h, item) {
 }
 
 # Function: calcSkew - calculate skewness of image [COMPLETE] ------------------------
-calcSkew = function(image_matrix, w, h, item) {
-  single_image = extractImage(image_matrix, w, h, item)
+calcSkew = function(single_image) {
   # Extract each non-white pixel as an x, y point
   extracted_coords = which(single_image > 0, arr.ind=T)
   return(cor(extracted_coords[,1], extracted_coords[,2]))
 }
 
-# Function: calcHoles - calculate number of holes in image ----------------
-calcHoles = function(image_matrix, w, h, item) {
-  # TESTING single_image = (extractImage(image_matrix, w, h, item) > 0) * 1
-  single_image = image_matrix
-  
+# Function: calcHoles - calculate number of holes in image [COMPLETE BUT SLOW] ----------------
+calcHoles = function(single_image) {
+  single_image = (single_image > 0) * 1
+  single_image = floodFill(single_image)
+  hole_cells = which(single_image == 0, arr.ind=T)
+  if(nrow(hole_cells) < 2) {
+    num_holes = nrow(hole_cells)
+  } else if (nrow(hole_cells) == 2) {
+    num_holes = ifelse(max(abs(hole_cells[1,] - hole_cells[2,])) > 1, 2, 1)
+  } else {
+    hole_cluster = cutree(hclust(dist(hole_cells, "maximum"), "single"), h = 1)
+    num_holes = length(unique(hole_cluster))
+  }
+  return(num_holes)
 }
 
-
 # Function: floodFill - flood fill an image from the boundary [COMPLETE] -------------
-floodFill = function(single_image, w, h) {
+floodFill = function(single_image) {
+  w = ncol(single_image)
+  h = nrow(single_image)
   # FLOOD FILL
   # fill boundaries
   single_image[1,single_image[1,]==0] = -1
   single_image[single_image[,1]==0,1] = -1
   single_image[h,single_image[h,]==0] = -1
   single_image[single_image[,w]==0,w] = -1
+  # Repeat each pass twice to ensure spirals are filled
+  for (r in 1:2) {
   # pass top to bottom
-  for (i in 2:(h-1)) {
-    for (j in 2:(w-1)) {
-      if(single_image[i-1,j]==-1 & single_image[i,j]==0) single_image[i,j] = -1
-    }
-  }
-  # pass bottom to top
-  for (i in (h-1):2) {
-    for (j in (w-1):2) {
-      if(single_image[i+1,j]==-1 & single_image[i,j]==0) single_image[i,j] = -1
-    }
-  }
-  # pass left to right
-  for (j in 2:(w-1)) {
     for (i in 2:(h-1)) {
-      if(single_image[i,j-1]==-1 & single_image[i,j]==0) single_image[i,j] = -1
+      for (j in 2:(w-1)) {
+        if((single_image[i-1,j]==-1 |
+            single_image[i-1,j-1]==-1 |
+            single_image[i-1,j+1]==-1) & single_image[i,j]==0) single_image[i,j] = -1
+      }
     }
-  }
-  # pass right to left
-  for (j in (w-1):2) {
+    # pass bottom to top
     for (i in (h-1):2) {
-      if(single_image[i,j+1]==-1 & single_image[i,j]==0) single_image[i,j] = -1
+      for (j in (w-1):2) {
+        if((single_image[i+1,j]==-1 |
+            single_image[i+1,j-1]==-1 |
+            single_image[i+1,j+1]==-1) & single_image[i,j]==0) single_image[i,j] = -1
+      }
+    }
+    # pass left to right
+    for (j in 2:(w-1)) {
+      for (i in 2:(h-1)) {
+        if((single_image[i,j-1]==-1 |
+            single_image[i-1,j-1]==-1 |
+            single_image[i+1,j-1]==-1) & single_image[i,j]==0) single_image[i,j] = -1
+      }
+    }
+    # pass right to left
+    for (j in (w-1):2) {
+      for (i in (h-1):2) {
+        if((single_image[i,j+1]==-1 |
+            single_image[i-1,j+1]==-1 |
+            single_image[i+1,j+1]==-1) & single_image[i,j]==0) single_image[i,j] = -1
+      }
     }
   }
   return(single_image)
 }
-
 
 # Function: crossValidatedSVC - Perform cross-validated support vector classification ---------
 crossValidatedSVC = function(trainX,
