@@ -1,0 +1,138 @@
+---
+title: "LUPI with MNIST"
+author: "Andy White"
+date: "31 August 2016"
+output: html_document
+---
+
+Experiments with the MNIST dataset. Some libraries and functions:
+
+```{r}
+# LIBRARIES
+# I have attempted to use base R functions wherever possible
+# 1. EBImage is used in resizeImages; next two lines are to install it in your R environment
+# source("http://bioconductor.org/biocLite.R")
+# biocLite("EBImage")
+library(EBImage) # EBImage::resize() is called in resizeImages
+# 2. CVST - "Fast Cross-Validation via Sequential Testing"
+# install.packages("CVST")
+library(CVST) # Used to emulate SKLearn CV, SVM and KRR functionality
+# 3. xgboost - "eXtreme Gradient Boosting"
+# install.packages("xgboost")
+library(xgboost)
+
+# Function: readDat - Read in the MNIST files as a matrix [COMPLETE] ---------------------------
+readDat = function(filename, n) {
+  infile = file(filename, "rb") # open image file connection
+  on.exit(close(infile)) # close connection when function exits
+  readBin(infile, integer(), n=4, endian="big")
+  outmat = matrix(as.double(readBin(infile, integer(), size=1, n=28*28*n, endian="big", signed=F)), nrow=n, ncol=28*28, byrow=T)
+  return(outmat)
+}
+
+# Function: readLabels - Read in the MNIST labels as a vector [COMPLETE] --------
+readLabels = function(filename, n) {
+  infile = file(filename, "rb") # open label file connection
+  on.exit(close(infile)) # close connection when function exits
+  readBin(infile, integer(), n=2, endian="big")
+  return(readBin(infile, integer(), size=1, n=n, endian="big"))
+}
+
+# Function: resizeImages - Resize the images [COMPLETE BUT] ---------------------------------------------
+resizeImages = function(images, inx, iny, outx, outy) {
+  n = nrow(images)
+  outmat = matrix(rep(0, outx*outy*n), nrow=n, ncol=outx*outy)
+  for (i in 1:n) {
+    outmat[i,] = as.vector(resize(matrix(images[i,], inx, iny), outx, outy))
+  }
+  return(outmat)
+}
+
+# Function: corruptImages - Corrupt the images [COMPLETE] --------
+corruptImages = function(images, corruptions) {
+  n = nrow(images)
+  p = ncol(images)
+  for (i in 1:n) {
+    corruptcells = sample(p, corruptions)
+    images[i,corruptcells] = sample(255, corruptions, replace=T)
+  }
+  return(images)
+}
+
+# Function: showDigit - Display a digit [COMPLETE] ------------------------
+showDigit = function(single_image) {
+  return(image(single_image, col=grey(seq(1, 0, length=256))))
+}
+
+# Function: extractImage - Extract image from vector [COMPLETE] -----------
+extractImage = function(image_matrix, w, h, item) {
+  return(matrix(image_matrix[item,], w, h)[,h:1])
+}
+```
+
+Load data:
+
+```{r}
+train_image_file = ("train-images-idx3-ubyte")
+train_label_file = ("train-labels-idx1-ubyte")
+test_image_file = ("t10k-images-idx3-ubyte")
+test_label_file = ("t10k-labels-idx1-ubyte")
+train_images = readDat(train_image_file, 60000)
+train_images_resize = resizeImages(train_images, 28, 28, 10, 10)
+train_images_corrupt = corruptImages(train_images, 300)
+train_labels = readLabels(train_label_file, 60000)
+test_images = readDat(test_image_file, 10000)
+test_images_resize = resizeImages(test_images, 28, 28, 10, 10)
+test_images_corrupt = corruptImages(test_images, 300)
+test_labels = readLabels(test_label_file, 10000)
+# Remove invariant features in the resized images (the corrupted images have no invariant features)
+merge_resizes = rbind(train_images_resize, test_images_resize)
+invar_feats = which(sapply(1:ncol(train_images_resize), function(x) var(merge_resizes[,x]))<0.1)
+train_images_resize_cleaned = train_images_resize[,-invar_feats]
+test_images_resize_cleaned = test_images_resize[,-invar_feats]
+```
+
+Cycle through some models:
+
+```{r}
+unpriv_error = c()
+priv_error = c()
+lupi_error = c()
+sample_sizes = c(500, 1000, 10000, 20000, 40000, 60000)
+for (sample_size in sample_sizes) {
+  train_sample = sample(60000, sample_size)
+  xgb_s = xgboost(cbind(train_images_resize_cleaned[train_sample,], train_images_corrupt[train_sample,]),
+                     label=train_labels[train_sample], nrounds=20, eta=0.1, objective="multi:softprob", num_class=10)
+  xgb_unpriv = xgboost(train_images_corrupt[train_sample,],
+                       label=train_labels[train_sample], nrounds=20, eta=0.1, objective="multi:softmax", num_class=10)
+  xgb_priv = xgboost(train_images_resize_cleaned[train_sample,],
+                     label=train_labels[train_sample], nrounds=20, eta=0.1, objective="multi:softmax", num_class=10)
+  s_lupi = matrix(predict(xgb_s, cbind(train_images_resize_cleaned[train_sample,], train_images_corrupt[train_sample,])),
+                  nrow=sample_size, ncol=10, byrow=T)
+  preds_lupi = matrix(rep(0,10*10000), nrow=10000, ncol=10)
+  for (i in 1:10) {
+    xgb_lupi = xgboost(train_images_corrupt[train_sample,],
+                       label=s_lupi[,i], nrounds=20, eta=0.1, objective="reg:linear")
+    preds_lupi[,i] = predict(xgb_lupi, test_images_corrupt)
+  }
+  preds_unpriv = predict(xgb_unpriv, test_images_corrupt)
+  preds_priv = predict(xgb_priv, test_images_resize_cleaned)
+  preds_lupi = (0:9)[apply(preds_lupi, 1, function(x) which(x==max(x)))]
+  unpriv_error = c(unpriv_error, sum(preds_unpriv != test_labels)/10000)
+  priv_error = c(priv_error, sum(preds_priv != test_labels)/10000)
+  lupi_error = c(lupi_error, sum(preds_lupi != test_labels)/10000)
+}
+plot(unpriv_error, type="b", col="blue")
+lines(priv_error, type="b", col="purple")
+lines(lupi_error, col="red", type="b")
+library(ggplot2)
+errors = cbind.data.frame(Error=c(unpriv_error, priv_error, lupi_error), Sample=rep(sample_sizes, 3),
+                          Model=c(rep("Unprivileged", length(sample_sizes)),
+                                  rep("Privileged", length(sample_sizes)),
+                                  rep("Distilled LUPI", length(sample_sizes))))
+ggplot(errors) + geom_line(aes(x=Sample, y=Error, colour=Model)) +
+  geom_point(aes(x=Sample, y=Error, colour=Model), alpha=0.5) +
+  scale_y_continuous(breaks=seq(0, 1, 0.05)) +
+  xlab("Sample Size") + ylab("Error rate")
+errors
+```
