@@ -1,0 +1,94 @@
+---
+title: "Privileged information as a more balanced Y"
+author: "Andy White"
+date: "27 August 2016"
+output: html_document
+---
+
+Below is a simulated X:X*:Y without any noise term.
+
+```{r}
+set.seed(1)
+X = matrix(rnorm(10000*50), nrow=10000, ncol=50)
+coef_fstar = matrix(rnorm(50*5), nrow=50, ncol=5)
+Xstar = X %*% coef_fstar
+coef_g = rnorm(5)
+Y = Xstar %*% coef_g
+Yclass = as.numeric(Y >= tail(sort(Y), 5000)[1])
+```
+
+Functions for playing with this:
+
+```{r, echo=FALSE}
+library(glmnet)
+library(ggplot2)
+library(reshape2)
+# Brier Scoring function for assessing performance of binomial probability scores
+brier = function(outcome, predicted) {
+  n = length(outcome)
+  sum((predicted - outcome)^2)/n
+}
+
+# Predict privileged information
+predictPriv = function(train_x_unpriv, train_x_priv, test_x_unpriv) {
+  train_n = nrow(train_x_unpriv)
+  test_n = nrow(test_x_unpriv)
+  unpriv_p = ncol(train_x_unpriv)
+  priv_p = ncol(train_x_priv)
+  test_x_predicted_priv = matrix(rep(0, test_n * priv_p), nrow=test_n, ncol=priv_p)
+  for (i in 1:ncol(train_x_priv)) {
+    ridge_model = cv.glmnet(as.matrix(train_x_unpriv), train_x_priv[,i], nfolds=3, family="gaussian")
+    test_x_predicted_priv[,i] = predict(ridge_model, as.matrix(test_x_unpriv), se="lambda.min")[,1]
+  }
+  return(test_x_predicted_priv)
+}
+
+modelTest = function(x, y, xstar, start_n, end_n, increment=1) {
+  require(glmnet)
+  x = as.matrix(x)
+  n = nrow(x)
+  test_sequences = seq(start_n, end_n, increment)
+  results = matrix(rep(0, length(test_sequences)*4), nrow=length(test_sequences), ncol=4)
+  colnames(results) = c("n", "unprivileged", "transferred", "privileged")
+  ridge_and_brier = function(train_x, train_y, test_x, test_y) {
+    ridge_model = cv.glmnet(train_x, train_y, nfolds=3, family="binomial")
+    predictions = predict(ridge_model, test_x, type="response", se="lambda.min")
+    return(brier(test_y, predictions[,1]))
+  }
+  for (i in 1:length(test_sequences)) {
+    # Build training sets
+    train_sample = sample(n, test_sequences[i])
+    train_y = y[train_sample]
+    test_y = y[-train_sample]
+    train_x_priv = xstar[train_sample,]
+    train_x_all = x[train_sample,]
+    test_x_priv = xstar[-train_sample,]
+    test_x_all = x[-train_sample,]
+    test_x_transferred = predictPriv(train_x_all, train_x_priv, test_x_all)
+    # Build ridge models
+    # Access to privileged throughout
+    results[i,"n"] = test_sequences[i]
+    results[i,"unprivileged"] = ridge_and_brier(train_x_all, train_y, test_x_all, test_y)
+    results[i,"transferred"] = ridge_and_brier(train_x_priv, train_y, test_x_transferred, test_y)
+    results[i,"privileged"] = ridge_and_brier(train_x_priv, train_y, test_x_priv, test_y)
+  }
+  results = as.data.frame(results)
+  return(results)
+}
+```
+
+Test it:
+
+```{r}
+model_tests = modelTest(X, Yclass, Xstar, 1000, 4000, 250)
+ggplot(melt(model_tests, id="n")) +
+  geom_point(aes(x=n, y=value, colour=variable)) +
+  ggtitle("Raw results") +
+  ylab("Brier Score") +
+  xlab("Number of training examples")
+ggplot(melt(model_tests, id="n")) +
+  geom_smooth(aes(x=n, y=value, colour=variable)) +
+  ggtitle("Smoothed results") +
+  ylab("Brier Score") +
+  xlab("Number of training examples")
+```

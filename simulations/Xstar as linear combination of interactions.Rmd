@@ -1,0 +1,48 @@
+---
+title: "Xstar as linear combination of interactions"
+author: "Andy White"
+date: "17 August 2016"
+output: html_document
+---
+
+Below we can see that a single interaction term relating $X$ to $X^*$ and another relating $X^*$ to $Y$ results in a highly unusual relationship between $X$ and $Y$. 
+
+```{r}
+library(ggplot2)
+set.seed(1)
+X = matrix(rnorm(2*10000), nrow=10000, ncol=2)
+Xstar = cbind(X, X[,1] * X[,2]) %*% matrix(rnorm(3*2), nrow=3, ncol=2)
+Y = cbind(Xstar, Xstar[,1] * Xstar[,2]) %*% matrix(rnorm(3), nrow=3, ncol=1)
+Yclass = Y > median(Y)
+ggplot() + geom_point(aes(Xstar[,1], Xstar[,2], colour=factor(Yclass))) + labs(x="X*1", y="X*2", main="Classification of data in X*")
+ggplot() + geom_point(aes(X[,1], X[,2], colour=factor(Yclass))) + labs(x="X1", y="X2", main="Classification of data in X")
+```
+
+Below we have a 10-dimensional input set. $X^*$ is a random linear combination of $X$ including all 2-way interaction terms. This gives a total of `r sum(choose(10, 1:2))` input features.
+
+$Y$ is a random linear combination of $X^*$ including all 2-way interaction terms. Again, this gives a total of `r sum(choose(10, 1:2))` input features.
+
+```{r}
+X = matrix(rnorm(10*10000), nrow=10000, ncol=10)
+colnames(X) = paste0("x", 1:10)
+interactions = combn(colnames(X), 2)
+X_with_interactions = cbind(X, apply(interactions, 2, function(x) X[,x[1]] * X[,x[2]]))
+Xstar = X_with_interactions %*% matrix(rnorm(ncol(X_with_interactions) * 10), nrow=ncol(X_with_interactions), ncol=10)
+colnames(Xstar) = paste0("x", 1:10)
+Xstar_with_interactions = cbind(Xstar, apply(interactions, 2, function(x) Xstar[,x[1]] * X[,x[2]]))
+Y = Xstar_with_interactions %*% matrix(rnorm(ncol(Xstar_with_interactions)), nrow=ncol(Xstar_with_interactions), ncol=1)
+Yclass = Y > median(Y)
+ggplot() + geom_point(aes(Xstar[,1], Xstar[,2], colour=factor(Yclass))) + labs(x="X*1", y="X*2", main="Classification of data in X*")
+ggplot() + geom_point(aes(X[,1], X[,2], colour=factor(Yclass))) + labs(x="X1", y="X2", main="Classification of data in X")
+```
+
+Now let's try and learn $Y$ from $X$ using all 4-way interaction terms and a logistic classifier:
+
+```{r}
+for (i in seq(100, 2000, 100)) {
+  train_samples = sample(10000, i)
+  
+}
+```
+
+End.

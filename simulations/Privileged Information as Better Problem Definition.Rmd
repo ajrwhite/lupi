@@ -1,0 +1,193 @@
+---
+title: "Privileged information as better problem definition"
+author: "Andy White"
+date: "1 August 2016"
+output: html_document
+---
+
+### Introduction
+
+In both Vapnik's *Learning Using Privileged Information* (*LUPI*) and *Feature* / *Representation Learning*, we typically think of our task as learning a better "representation" of $X$ (Vapnik calls this $X^*$).
+
+This implies that there is something confusing about our $X$ representation which can be "disentangled" (Bengio et al 2014) by a superior $X^*$ representation.
+
+However, it may not be our $X$ representation that is causing us problems. Instead, our $Y$ definition may be entangled - typically because of conflated labels.
+
+Here I show, using intuitive 2-dimensional examples, that $X^*$ as a redefinition of $Y$ can turn an intractable problem into a trivial one.
+
+### Example
+
+In the example below, we have a classic binary classification problem:
+
+```{r, echo=F, warning=F, message=F}
+library(ggplot2)
+generate_xy = function(n, means, sds, ylab) {
+  p = length(means)
+  xvars = paste0("x", 1:p)
+  output_df = cbind.data.frame(apply(cbind(means, sds), 1, function(x) rnorm(n, x[1], x[2])), rep(ylab, n))
+  names(output_df) = c(xvars, "y")
+  return(output_df)
+}
+set.seed(1)
+y1 = generate_xy(100, c(1, 2), c(1.5, 0.5), "k1")
+y2 = generate_xy(100, c(4, 5), c(0.5, 1), "k2")
+y3 = generate_xy(100, c(7, 6), c(0.5, 0.5), "k3")
+all_data = rbind.data.frame(y1, y2, y3)
+all_data$BinaryY = as.numeric(all_data$y %in% c("k1", "k3"))
+ggplot(all_data) + geom_point(aes(x=x1, y=x2, colour=factor(BinaryY))) +
+  labs(title="Binary Classification Task with 2-Dimensional Input", colour="Y Category")
+```
+
+This data is not linearly separable. Here's the decision boundary for a logistic regression classifier:
+
+```{r, echo=F, warning=F, message=F}
+binary_model = glm(BinaryY ~ x1 + x2, data=all_data, family="binomial")
+grid_data = as.data.frame(expand.grid(seq(-3, 9.5, 0.1), seq(0, 7.5, 0.1)))
+names(grid_data) = c("x1", "x2")
+decbound = as.factor(as.numeric(predict(binary_model, grid_data, type="response")>0.5))
+ggplot(grid_data) +
+  geom_point(aes(x1, x2, colour=decbound), alpha=0.3) +
+  geom_point(data=all_data, aes(x1, x2, colour=factor(BinaryY))) +
+  labs(title="Binary Logistic Regression Decision Boundary", colour="Y Category")
+```
+
+The best possible linear classifier, trained on all the data, has a terrible error rate of `r sum(as.numeric(predict(binary_model, all_data, type="response")>0.5) != all_data$BinaryY) / nrow(all_data)`.
+
+But what if it turned out that $y=1$ actually comprised two distinct subcategories of $Y$? This is a very common situation.
+
+For example, our $Y$ space could be the set *{European, Non-European}* but our data contains information from *{Spain, Russia, Morocco}*. European vs. non-European may be the relevant distinction to our eventual decision, but Spanish vs. Russian vs. Moroccan is much more likely to be predictable from our dataset.
+
+Or we might want to identify likely customers for a mid-range clothing brand. Our $Y$ space could be the set *{Likely Purchaser, Unlikely Purchaser}*, but a better label space might be *{Unlikely (Poor), Unlikely (Affluent), Likely}*. The poor and affluent unlikely purchasers probably inhabit completely different regions of our $X$ feature space, that "sandwiches" our likely mid-range purchasers - and yet a linear classifier will aim to find a general rule that applies to both.
+
+Again, our eventual decision for both poor and affluent unlikely customers will be the same. But the multiclass problem is much closer to the input data.
+
+Here is our example dataset visualised as a 3-category problem:
+
+```{r, echo=F, warning=F, message=F}
+ggplot(all_data) + geom_point(aes(x1, x2, colour=factor(y))) +
+  labs(title="Multiclass Classification Task with 2-Dimensional Input", colour="Y Category")
+```
+
+Let's use a multinomial logistic model:
+
+```{r, echo=F, warning=F, message=F}
+library(nnet)
+captured_output = capture.output(multi_model <- multinom(y ~ x1 + x2, data=all_data))
+decbound = predict(multi_model, grid_data)
+ggplot(grid_data) +
+  geom_point(aes(x1, x2, colour=decbound), alpha=0.3) +
+  geom_point(data=all_data, aes(x1, x2, colour=factor(y))) +
+  labs(title="Multiclass Logistic Regression Decision Boundaries", colour="Y Category")
+
+```
+
+The linear classifier trained on all the data now has an error rate of 0. We can correctly classify every example.
+
+### So What?
+
+So far, so obvious. In our first example, the binary $Y \in \{0,1\}$ labels are not linearly separable. In our second example, with $Y \in \{k_1,k_2,k_3\}$ categories, we are able to linearly separate $k_1$ and $k_3$ in one-vs-all comparisons, therefore leaving the remaining examples as $k_2$.
+
+But now let's think about this as an *LUPI* problem:
+
+- $X$ is supplied to us with the binary $Y$ labels
+- for some examples, we are also supplied with $X^*$, the 3 categories
+- we need to construct a model predicting $Y$ from $X^*$
+- and a model predicting $X^*$ from $X$
+- we impose the constraint of only using linear models
+
+Well, predicting $Y$ from $X^*$ is trivial in this setting, since:
+
+$P(y=1|x^*=k_1)=1$,
+
+$P(y=1|x^*=k_2)=0$,
+
+and $P(y=1|x^*=k_3)=1$.
+
+This is the maximum likelihood estimate for any sample containing at least one of each $X^*$ category. Therefore, in this case, our error rate for predicting $Y$ from $X^*$ is guaranteed to be 0.
+
+So the question is whether we can predict $X^*$ correctly from $X$. We have already shown above that we can do this with 0% error if we have all the data.
+
+Let's try it on a random sample, and see how quickly we beat the binary classifier's error rate of 0.24:
+
+```{r, echo=F, warning=F, message=F}
+n_sequence = seq(20, 300, 5)
+trials = 50
+error_record = matrix(ncol=trials+1, nrow=length(n_sequence))
+colnames(error_record) = c("n", paste0("round", 1:trials))
+error_record[,1] = n_sequence
+for (n in n_sequence) {
+  for (i in 1:trials) {
+    train_sample = sample(300, n)
+    capture.output(multi_model <- multinom(y ~ x1 + x2, data=all_data[train_sample,]))
+    predictions = predict(multi_model, all_data)
+    error_record[error_record[,1]==n,i+1] = sum(predictions != all_data$y) / 300
+  }
+}
+error_record = as.data.frame(error_record)
+library(reshape2)
+ggplot(melt(error_record, id="n")) + geom_point(aes(x=n, y=value), colour="red", alpha=0.2) + geom_smooth(aes(x=n, y=value)) +
+  scale_x_continuous(breaks=seq(20, 300, 20)) +
+  labs(title="Error rate of logistic prediction of X*", x="Number of training examples (n)", y="Error rate")
+```
+
+Our starting point of $n=20$ training examples immediately beats our binary classifier trained on $n=300$ examples!
+
+But is this just a semantic trick? Have we basically added a degree of freedom? Yes, of course, but there are many different ways of adding degrees of freedom to our model, whereas *LUPI* ensures that we add these intelligently, within sensible constraints.
+
+### Learning Without Privileged Information
+
+Below we see what happens when we add a feature interaction term, $x_1 x_2$ to our binary logistic model trained on all 300 examples:
+
+```{r, echo=F, warning=F, message=F}
+free_model = glm(BinaryY ~ x1 * x2, data=all_data, family="binomial")
+free_decbound = as.factor(as.numeric(predict(free_model, grid_data)>0.5))
+ggplot(grid_data) +
+  geom_point(aes(x1, x2, colour=free_decbound), alpha=0.3) +
+  geom_point(data=all_data, aes(x1, x2, colour=factor(BinaryY))) +
+  labs(title="Binary Logistic Regression Decision Boundary with Feature Interaction Term", colour="Y Category")
+```
+
+Our error rate here is now an impressive `r sum(as.numeric(predict(free_model, all_data, type="response")>0.5) != all_data$BinaryY) / nrow(all_data)`.
+
+Let's see how our error rate performs on different sample sizes:
+
+```{r, echo=F, warning=F, message=F}
+n_sequence = seq(20, 300, 5)
+trials = 50
+error_record = matrix(ncol=trials+1, nrow=length(n_sequence))
+colnames(error_record) = c("n", paste0("round", 1:trials))
+error_record[,1] = n_sequence
+for (n in n_sequence) {
+  for (i in 1:trials) {
+    train_sample = sample(300, n)
+    free_model <- glm(BinaryY ~ x1 * x2, data=all_data[train_sample,])
+    predictions = as.numeric(predict(free_model, all_data, type="response") > 0.5)
+    error_record[error_record[,1]==n,i+1] = sum(predictions != all_data$BinaryY) / 300
+  }
+}
+error_record = as.data.frame(error_record)
+library(reshape2)
+ggplot(melt(error_record, id="n")) + geom_point(aes(x=n, y=value), colour="red", alpha=0.2) + geom_smooth(aes(x=n, y=value)) +
+  scale_x_continuous(breaks=seq(20, 300, 20)) +
+  labs(title="Error rate of logistic prediction of Y with interaction terms", x="Number of training examples (n)", y="Error rate")
+```
+
+This is still quite impressive, but it doesn't decline to zero like the *LUPI* model.
+
+Moreover, as the dimensionality of $X$ increases, the number of potential feature interactions grows, whereas this form of *LUPI* is robust to high dimensional input spaces.
+
+For example, if $X \in \mathbb{R}^{20}$ there are `r choose(20, 2)` possible 2-way feature interactions and `r choose(20, 3)` possible 3-way feature interactions. When $X \in \mathbb{R}^{100}$ there are `r choose(100, 2)` 2-way interactions and $`r choose(100, 3)`$ 3-way interactions.
+
+This is an enormous search space, and millions of training items are then required to avoid picking up coincidental relationships.
+
+Predicting a simple $X^*$ representation from a 100-dimensional input is much more straightforward, as a 100-way interaction is simply a linear combination of $X$ that predicts $X^*$.
+
+### Real-world applications
+
+Obviously this example has been artificially constructed to prove that under certain assumptions *LUPI* offers demonstrable improvements.
+
+But it is easy to imagine real-world situations where machine learning has hit an impasse because the problem definition is poorly conceived.
+
+For example, a company with 5 separate teams attempts to forecast monthly revenue across the business. Yet it may be that factors that help one team hinder another. A general model could completely miss the significance of this feature, by averaging out the positive effect it has on one team's sales with the negative effect it has on another's. We can supply each team's individual performance as privileged $X^*$ information, and then our goal in future forecasting tasks is to first predict $X^*$ and then predict $Y$ from that. 
+
+Similarly, in medical research, a drug may be hugely effective among a group of people with a very specific genetic profile, while having no effect or negative side effects on another group. If we do not distinguish between these groups, we average out these effects. However, it may be completely unfeasible for the researchers to obtain information about the genetic profile of each subject - in this case, *LUPI* offers a way out, as we can obtain this information for a subset of the research sample, predict this $X^*$ information over the rest of the population, and then attempt to model $f(x^*) = y$

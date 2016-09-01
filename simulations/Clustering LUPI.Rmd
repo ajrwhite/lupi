@@ -1,0 +1,145 @@
+---
+title: "Clustering LUPI"
+author: "Andy White"
+date: "29 August 2016"
+output: html_document
+---
+
+Clustering with privileged information:
+
+```{r}
+library(plot3D)
+genClusters = function(cluster_sizes, n_dimensions) {
+  # cluster_sizes is a vector of cluster sizes
+  n_clusters = length(cluster_sizes)
+  clust_df = as.data.frame(do.call(rbind,
+                                   sapply(cluster_sizes,
+                                          function(n) sapply(1:n_dimensions,
+                                                             function(x) rnorm(n, rnorm(1, 0, 10), sample(3, 1))), simplify=F)))
+  names(clust_df) = paste0("v", 1:n_dimensions)
+  clust_df[,"cluster"] = unlist(sapply(1:n_clusters, function(x) rep(x, cluster_sizes[x]), simplify=F))
+  return(clust_df)
+}
+set.seed(1)
+cluster_sim = genClusters(rep(200, 6), 3)
+cluster_cols = c("blue", "orange", "purple", "grey", "pink", "cyan")
+scatter3D(cluster_sim[,1], cluster_sim[,2], cluster_sim[,3], colvar=cluster_sim[,"cluster"], col=cluster_cols, pch=20)
+```
+
+Now showing 2D plots:
+
+```{r}
+library(ggplot2)
+plot2d = function(var1, var2) {
+  print(
+    ggplot(cluster_sim) +
+      geom_point(aes(get(var1), get(var2), colour=factor(cluster))) +
+      scale_colour_manual(values=cluster_cols) +
+      xlab(var1) +
+      ylab(var2) +
+      ggtitle(paste(var1, "x", var2))
+      )
+}
+plot2d("v1", "v2")
+plot2d("v1", "v3")
+plot2d("v2", "v3")
+```
+
+Now use K-means to identify 6 clusters on the whole sample:
+
+```{r}
+# All 3 dimensions
+kclusts_all = kmeans(cluster_sim[,1:3], 6, nstart=100)
+# Dimensions 1 and 2
+kclusts_1x2 = kmeans(cluster_sim[,1:2], 6, nstart=100)
+# Dimensions 1 and 3
+kclusts_1x3 = kmeans(cluster_sim[,c(1, 3)], 6, nstart=100)
+# Dimensions 2 and 3
+kclusts_2x3 = kmeans(cluster_sim[,2:3], 6, nstart=100)
+
+# Function for cluster plotting
+library(NMF)
+plot_clusts = function(title, clusters, actual_clusters) {
+  print(
+    ggplot() +
+      geom_bar(aes(as.factor(clusters), fill=as.factor(actual_clusters))) +
+      scale_fill_manual(values=cluster_cols, name="Actual clusters") +
+      ggtitle(paste(title, "/ Purity =", round(purity(as.factor(clusters), as.factor(actual_clusters)), 3))) +
+      xlab("K-means clusters")
+  )
+}
+
+
+plot_clusts("K-means on all dimensions", kclusts_all$cluster, cluster_sim$cluster)
+plot_clusts("K-means on v1 and v2", kclusts_1x2$cluster, cluster_sim$cluster)
+plot_clusts("K-means on v1 and v3", kclusts_1x3$cluster, cluster_sim$cluster)
+plot_clusts("K-means on v2 and v3", kclusts_2x3$cluster, cluster_sim$cluster)
+```
+
+Now do same with only a random 50% of the data:
+
+```{r}
+train_sample = sample(1200, 600)
+# All 3 dimensions
+kclusts_all = kmeans(cluster_sim[train_sample,1:3], 6, nstart=100)
+# Dimensions 1 and 2
+kclusts_1x2 = kmeans(cluster_sim[train_sample,1:2], 6, nstart=100)
+# Dimensions 1 and 3
+kclusts_1x3 = kmeans(cluster_sim[train_sample,c(1,3)], 6, nstart=100)
+# Dimensions 2 and 3
+kclusts_2x3 = kmeans(cluster_sim[train_sample,2:3], 6, nstart=100)
+plot_clusts("K-means on all dimensions (50%)", kclusts_all$cluster, cluster_sim$cluster[train_sample])
+plot_clusts("K-means on v1 and v2 (50%)", kclusts_1x2$cluster, cluster_sim$cluster[train_sample])
+plot_clusts("K-means on v1 and v3 (50%)", kclusts_1x3$cluster, cluster_sim$cluster[train_sample])
+plot_clusts("K-means on v2 and v3 (50%)", kclusts_2x3$cluster, cluster_sim$cluster[train_sample])
+```
+
+Now do a nearest neighbour on remaining 50% of the data:
+
+```{r}
+library(class)
+# Run 1-nearest neighbour for comparison on each set
+knn_all = knn(cluster_sim[train_sample,1:3], cluster_sim[-train_sample,1:3], kclusts_all$cluster)
+knn_1x2_unpriv = knn(cluster_sim[train_sample,1:2], cluster_sim[-train_sample,1:2], kclusts_1x2$cluster)
+knn_1x3_unpriv = knn(cluster_sim[train_sample,c(1,3)], cluster_sim[-train_sample,c(1,3)], kclusts_1x3$cluster)
+knn_2x3_unpriv = knn(cluster_sim[train_sample,2:3], cluster_sim[-train_sample,2:3], kclusts_2x3$cluster)
+# Run LUPI clustering using 1-nearest neighbour
+knn_1x2_lupi = knn(cluster_sim[train_sample,1:2], cluster_sim[-train_sample,1:2], kclusts_all$cluster)
+knn_1x3_lupi = knn(cluster_sim[train_sample,c(1,3)], cluster_sim[-train_sample,c(1,3)], kclusts_all$cluster)
+knn_2x3_lupi = knn(cluster_sim[train_sample,2:3], cluster_sim[-train_sample,2:3], kclusts_all$cluster)
+# Merge into a full clustering
+merge_clusters = function(a, b, indices) {
+  output = rep(0, length(a) + length(b))
+  output[indices] = a
+  output[-indices] = b
+  return(output)
+}
+merged_all = merge_clusters(kclusts_all$cluster, knn_all, train_sample)
+merged_1x2_unpriv = merge_clusters(kclusts_1x2$cluster, knn_1x2_unpriv, train_sample)
+merged_1x3_unpriv = merge_clusters(kclusts_1x3$cluster, knn_1x3_unpriv, train_sample)
+merged_2x3_unpriv = merge_clusters(kclusts_2x3$cluster, knn_2x3_unpriv, train_sample)
+merged_1x2_lupi = merge_clusters(kclusts_all$cluster, knn_1x2_lupi, train_sample)
+merged_1x3_lupi = merge_clusters(kclusts_all$cluster, knn_1x3_lupi, train_sample)
+merged_2x3_lupi = merge_clusters(kclusts_all$cluster, knn_2x3_lupi, train_sample)
+plot_clusts("K-means on all dimensions (50%) + KNN on all dimensions (50%)", merged_all, cluster_sim$cluster)
+plot_clusts("K-means on v1 and v2 (50%) + KNN on v1 and v2 (50%)", merged_1x2_unpriv, cluster_sim$cluster)
+plot_clusts("K-means on v1 and v3 (50%) + KNN on v1 and v3 (50%)", merged_1x3_unpriv, cluster_sim$cluster)
+plot_clusts("K-means on v2 and v3 (50%) + KNN on v2 and v3 (50%)", merged_2x3_unpriv, cluster_sim$cluster)
+plot_clusts("CUPI: K-means on all dimensions (50%) + KNN on v1 and v2 (50%)", merged_1x2_lupi, cluster_sim$cluster)
+plot_clusts("CUPI: K-means on all dimensions (50%) + KNN on v1 and v3 (50%)", merged_1x3_lupi, cluster_sim$cluster)
+plot_clusts("CUPI: K-means on all dimensions (50%) + KNN on v2 and v3 (50%)", merged_2x3_lupi, cluster_sim$cluster)
+```
+
+We can also check the out-of-sample entropy:
+
+```{r}
+# v1 and v2
+entropy(knn_1x2_unpriv, cluster_sim$cluster[-train_sample])
+entropy(knn_1x2_lupi, cluster_sim$cluster[-train_sample])
+# v1 and v3
+entropy(knn_1x3_unpriv, cluster_sim$cluster[-train_sample])
+entropy(knn_1x3_lupi, cluster_sim$cluster[-train_sample])
+# v2 and v3
+entropy(knn_2x3_unpriv, cluster_sim$cluster[-train_sample])
+entropy(knn_2x3_lupi, cluster_sim$cluster[-train_sample])
+```
