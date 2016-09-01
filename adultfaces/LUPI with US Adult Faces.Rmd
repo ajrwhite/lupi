@@ -1,0 +1,120 @@
+---
+title: "LUPI with US Adult Faces"
+author: "Andy White"
+date: "31 August 2016"
+output: html_document
+---
+
+Our aim here is to predict gender from the images. The unprivileged setting just has access to the gender labels and the images; the LUPI setting has access to 5 privileged features:
+
+- teeth showing?
+- makeup?
+- facial hair?
+- attractiveness rating
+- friendliness rating
+
+```{r}
+library(raster)
+library(EBImage)
+library(data.table)
+library(ggplot2)
+library(xgboost)
+library(reshape2)
+filedir = "Face Annotations/Images and Annotations/"
+test_image = brick(paste0(filedir, "1.jpg"))
+# UNCOMMENT CODE BELOW THIS
+# image_matrix = matrix(rep(0, 2222*5000), nrow=2222, ncol=5000)
+# # Use luminosity method to greyscale - http://www.johndcook.com/blog/2009/08/24/algorithms-convert-color-grayscale/
+# for (i in 1:2222) {
+#   temp_image = brick(paste0(filedir, i, ".jpg"))
+#   ypix = temp_image@extent@ymax
+#   colvals = getValues(temp_image)
+#   greyvals = colvals[,1]*0.21 + colvals[,2]*0.72 + colvals[,3]*0.07
+#   image_matrix[i,] = as.vector(resize(matrix(greyvals, nrow=ypix, byrow=T), 100, 50))
+# }
+# # Remove invariant features
+# invar_feats = which(apply(image_matrix, 2, var) < 0.1)
+# image_matrix = image_matrix[,-invar_feats]
+# UNCOMMENT CODE ABOVE THIS
+load("image_matrix.RData")
+# Load privileged information
+annotations = fread("reduced_annotations.csv")
+annotations[,gender := as.factor(gender)]
+levels(annotations$gender) = c("female", "male")
+```
+
+Plot relationships between different attributes and male / female
+
+```{r}
+ggplot(annotations) + geom_boxplot(aes(x=gender, y=attractive)) + xlab("Gender") + ylab("Attractiveness")
+ggplot(annotations) + geom_boxplot(aes(x=gender, y=friendly)) + xlab("Gender") + ylab("Friendliness")
+ggplot(annotations) + geom_bar(aes(x=gender, fill=factor(teeth))) + xlab("Gender") + ylab("Count") + scale_fill_discrete(name="Teeth Code")
+ggplot(annotations) + geom_bar(aes(x=gender, fill=factor(makeup))) + xlab("Gender") + ylab("Count") + scale_fill_discrete(name="Makeup Code")
+ggplot(annotations) + geom_bar(aes(x=gender, fill=factor(facialhair))) + xlab("Gender") + ylab("Count") + scale_fill_discrete(name="Facial Hair Code")
+```
+
+In order to limit this to just 5 features, the ternary values for Teeth, Makeup and Facial Hair have been converted to binary values:
+
+```{r}
+annotations[teeth==2, teeth := 1]
+annotations[makeup==2, makeup := 1]
+annotations[facialhair==2, facialhair := 1]
+# Return gender to 0/1
+annotations[,gender := as.numeric(gender) - 1]
+```
+
+Now run through different training set sizes:
+
+```{r}
+logloss = function(actual, predicted) {
+  n = length(actual)
+  -sum(actual * log(predicted) + (1-actual) * log(1 - predicted))/n
+}
+set.seed(1)
+sample_sizes = c(50, 100, 250, 500, 1000, 1500, 2000)
+priv_error = c()
+unpriv_error = c()
+lupi_error = c()
+for (sample_size in sample_sizes) {
+  train_sample = sample(2222, sample_size)
+  priv_vars = c("teeth", "makeup", "facialhair", "attractive", "friendly")
+  train_priv = subset(annotations, select=priv_vars, subset=id %in% train_sample)
+  test_priv = subset(annotations, select=priv_vars, subset=!(id %in% train_sample))
+  train_y = annotations[train_sample, gender]
+  test_y = annotations[-train_sample, gender]
+  # Build XGB models
+  priv_model = xgboost(data=as.matrix(cbind(train_priv, image_matrix[train_sample,])), label=train_y, nrounds=30, eta=0.1, objective="binary:logistic")
+  priv_preds = predict(priv_model, as.matrix(cbind(test_priv, image_matrix[-train_sample,])))
+  unpriv_model = xgboost(data=image_matrix[train_sample,], label=train_y, nrounds=30, eta=0.1, objective="binary:logistic")
+  unpriv_preds = predict(unpriv_model, image_matrix[-train_sample,])
+  # Build Naive LUPI models
+  teeth_model = xgboost(data=image_matrix[train_sample,], label=train_priv[,teeth], nrounds=30, eta=0.1, objective="binary:logistic")
+  teeth_preds = predict(teeth_model, image_matrix[-train_sample,])
+  makeup_model = xgboost(data=image_matrix[train_sample,], label=train_priv[,makeup], nrounds=30, eta=0.1, objective="binary:logistic")
+  makeup_preds = predict(makeup_model, image_matrix[-train_sample,])
+  fh_model = xgboost(data=image_matrix[train_sample,], label=train_priv[,facialhair], nrounds=30, eta=0.1, objective="binary:logistic")
+  fh_preds = predict(fh_model, image_matrix[-train_sample,])
+  att_model = xgboost(data=image_matrix[train_sample,], label=train_priv[,attractive], nrounds=30, eta=0.1, objective="reg:linear")
+  att_preds = predict(att_model, image_matrix[-train_sample,])
+  friend_model = xgboost(data=image_matrix[train_sample,], label=train_priv[,friendly], nrounds=30, eta=0.1, objective="reg:linear")
+  friend_preds = predict(friend_model, image_matrix[-train_sample,])
+  lupi_preds = predict(priv_model, cbind(teeth_preds, makeup_preds, fh_preds, att_preds, friend_preds, image_matrix[-train_sample,]))
+  priv_error = c(priv_error, logloss(test_y, priv_preds))
+  unpriv_error = c(unpriv_error, logloss(test_y, unpriv_preds))
+  lupi_error = c(lupi_error, logloss(test_y, lupi_preds))
+}
+errors = data.frame(Sample=rep(sample_sizes, 3),
+                    Logloss=c(priv_error, unpriv_error, lupi_error),
+                    Model=c(rep("Privileged", length(sample_sizes)), rep("Unprivileged", length(sample_sizes)),
+                            rep("Naive LUPI", length(sample_sizes))))
+```
+
+Now plot error:
+
+```{r}
+ggplot(melt(errors, measure.vars="Logloss")) + geom_line(aes(x=Sample, y=value, colour=Model)) +
+  geom_point(aes(x=Sample, y=value, colour=Model), alpha=0.5) + xlab("Sample size") + ylab("Logloss")
+errors
+```
+
+End.
