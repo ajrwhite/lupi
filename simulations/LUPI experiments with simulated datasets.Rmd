@@ -1,0 +1,108 @@
+---
+title: "LUPI experiments with simulated datasets"
+author: "Andy White"
+date: "25 July 2016"
+output: html_document
+---
+
+Learning Using Privileged Information (LUPI) is a machine learning paradigm where additional "privileged" information is supplied for some of the training data, but which is not available at the test stage.
+
+The aim of these experiments is to empirically test the performance of "Knowledge Transfer", using simulated datasets.
+
+## Functions and libraries
+
+```{r}
+library(glmnet)
+library(ggplot2)
+library(reshape2)
+# Brier Scoring function for assessing performance of binomial probability scores
+logloss = function(actual, predicted) {
+  n = length(actual)
+  -sum(actual * log(predicted) + (1-actual) * log(1 - predicted))/n
+}
+
+# Generate random IID dataset with irrelevant variables
+genRandIIDData = function(n, total_p, relevant_p, class_balance, seed) {
+  set.seed(seed)
+  full_data = matrix(rnorm(n * total_p), nrow=n, ncol=total_p)
+  colnames(full_data) = paste0("v", 1:total_p)
+  relevant_vars = colnames(full_data)[sort(sample(total_p, relevant_p))]
+  coefs = rnorm(relevant_p, mean=1)
+  intercept = rnorm(1, mean=1)
+  y_num = full_data[,relevant_vars] %*% coefs + intercept + rnorm(n)
+  y = rep(0, n)
+  y[y_num<sort(y_num)[round(n*class_balance)]] = 1
+  return(list(x=as.data.frame(full_data), relevant_vars=relevant_vars, coefs=coefs, intercept=intercept, y_num=y_num, y=y))
+}
+
+# Predict privileged information
+predictPriv = function(train_x_unpriv, train_x_priv, test_x_unpriv) {
+  train_n = nrow(train_x_unpriv)
+  test_n = nrow(test_x_unpriv)
+  unpriv_p = ncol(train_x_unpriv)
+  priv_p = ncol(train_x_priv)
+  test_x_predicted_priv = matrix(rep(0, test_n * priv_p), nrow=test_n, ncol=priv_p)
+  for (i in 1:ncol(train_x_priv)) {
+    ridge_model = cv.glmnet(as.matrix(train_x_unpriv), train_x_priv[,i], nfolds=3, family="gaussian")
+    test_x_predicted_priv[,i] = predict(ridge_model, as.matrix(test_x_unpriv), se="lambda.min")[,1]
+  }
+  return(test_x_predicted_priv)
+}
+
+modelTest = function(x, y, priv_vars, start_n, end_n, increment=1) {
+  require(glmnet)
+  x = as.matrix(x)
+  n = nrow(x)
+  test_sequences = seq(start_n, end_n, increment)
+  results = matrix(rep(0, length(test_sequences)*4), nrow=length(test_sequences), ncol=4)
+  colnames(results) = c("n", "unprivileged", "transferred", "privileged")
+  ridge_and_logloss = function(train_x, train_y, test_x, test_y) {
+    ridge_model = cv.glmnet(train_x, train_y, nfolds=3, family="binomial")
+    predictions = predict(ridge_model, test_x, type="response", se="lambda.min")
+    return(logloss(test_y, predictions[,1]))
+  }
+  for (i in 1:length(test_sequences)) {
+    # Build training sets
+    train_sample = sample(n, test_sequences[i])
+    train_y = y[train_sample]
+    test_y = y[-train_sample]
+    train_x_priv = x[train_sample,priv_vars]
+    train_x_all = x[train_sample,]
+    test_x_priv = x[-train_sample,priv_vars]
+    test_x_all = x[-train_sample,]
+    test_x_transferred = predictPriv(train_x_all, train_x_priv, test_x_all)
+    # Build ridge models
+    # Access to privileged throughout
+    results[i,"n"] = test_sequences[i]
+    results[i,"unprivileged"] = ridge_and_logloss(train_x_all, train_y, test_x_all, test_y)
+    results[i,"transferred"] = ridge_and_logloss(train_x_priv, train_y, test_x_transferred, test_y)
+    results[i,"privileged"] = ridge_and_logloss(train_x_priv, train_y, test_x_priv, test_y)
+  }
+  results = as.data.frame(results)
+  return(results)
+}
+```
+
+## Generate random IID data
+
+```{r}
+simulated_dataset = genRandIIDData(10000, 30, 5, 0.5, 1)
+```
+
+## Run model tests
+
+```{r}
+model_tests = modelTest(simulated_dataset$x, simulated_dataset$y, simulated_dataset$relevant_vars, 40, 2000, 5)
+ggplot(melt(model_tests, id="n")) +
+  geom_point(aes(x=n, y=value, colour=variable)) +
+  ggtitle("Raw results") +
+  ylab("Logloss") +
+  xlab("Number of training examples")
+ggplot(melt(model_tests, id="n")) +
+  geom_smooth(aes(x=n, y=value, colour=variable)) +
+  ggtitle("Smoothed results") +
+  ylab("Logloss") +
+  xlab("Number of training examples")
+```
+
+End.
